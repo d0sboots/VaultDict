@@ -8,6 +8,7 @@ This allows us to generate all words in the game.
 import argparse
 import collections
 import json
+import re
 
 # Out-of-game data: To use the ancientrunes font, we must map rune names to
 # characters. This essentially requires hardcoding the knowledge of what all
@@ -197,18 +198,107 @@ def lookup(word, word_dict):
     return word_dict[word].atoms
 
 
-def generate_wikitable(word_dict):
+def parse_original(original_file):
+    """Parse original wikitable content into a dictionary, keyed by atoms"""
+    words = {}
+    key = None
+    pending = []
+    # <nowiki> tags are optional. Meant to extract the text inside the
+    # template.
+    pat = re.compile(r'\| \{\{ALB\|(?:<nowiki>)?([^<>]*)(?:</nowiki>)?\}\}')
+    pat2 = re.compile(r'\| ?(.*)')
+    for line in original_file:
+        line = line.rstrip()
+        if line == '|-':
+            if key is not None:
+                if key in words:
+                    pending = words[key] + ["*duplicate*"] + pending
+                words[key] = pending
+                key = None
+                pending = []
+            continue
+        if key is None:
+            match = pat.fullmatch(line)
+            if not match:
+                raise ValueError("Couldn't match " + line)
+            key = match[1]
+        else:
+            match = pat2.fullmatch(line)
+            if not match:
+                raise ValueError("Couldn't match " + line)
+            pending.append(match[1])
+    if key is not None:
+        if key in words:
+            pending = words[key] + ["*duplicate*"] + pending
+        words[key] = pending
+    return words
+
+
+ALB_TABLE = {ord(x): f'&#{ord(x)};' for x in "';:="}
+
+
+def alb(atoms, use_nowiki):
+    """Format atoms using Template:ALB"""
+    if use_nowiki:
+        return '{{ALB|<nowiki>' + atoms + '</nowiki>}}'
+    return '{{ALB|' + atoms.translate(ALB_TABLE) + '}}'
+
+
+def print_wiki_word(word, word_dict, fields, use_nowiki):
+    """Print a wikitable entry for a single word"""
+    orig_names = {}
+    if fields:
+        if fields[0].endswith('(s)'):
+            orig_names = {fields[0][:-3]: True, fields[0][:-3] + 's': True}
+        else:
+            orig_names = {x.strip(): True for x in fields[0].split('/')}
+    names = []
+    for name in [word.name] + word.equivalences:
+        if name in orig_names:
+            names.append(name)
+            del orig_names[name]
+        else:
+            names.append(name + '?')
+    for name in orig_names:
+        names.append('!!' + name + '!!')
+    print('|-')
+    print('| ' + alb(word.atoms, use_nowiki))
+    print('| ' + ' / '.join(names))
+    print('| ' + ' '.join(
+        alb(lookup(x.casefold(), word_dict), use_nowiki) + f' ({x})'
+        for x in word.components))
+    if fields and len(fields) >= 2 and fields[1]:
+        print('| ' + fields[1])
+
+
+def generate_wikitable(word_dict, original, use_nowiki=True):
     """Print wikitable for the full word list"""
     words = list(word_dict.values())
     words.sort(key=lambda x:x.name.casefold())
+    known_atoms = {x.atoms for x in word_dict.values()}
+
+    original_list = list(original.items())
+    original_list.sort(key=lambda x:x[1][0].casefold())
+    for atoms, fields in original_list:
+        # Output all the original bits that don't appear in the extracted data
+        # first. They're either wrong, or the extracted data is wrong. Either
+        # way, we want to see it up front.
+        if atoms in known_atoms:
+            continue
+        print('|-')
+        print('| ' + alb(atoms, use_nowiki))
+        # Only print the first 3 fields, we're trimming the last one.
+        # We're also swapping the order of the last two fields.
+        print('| ' + fields[0])
+        if len(fields) >= 2:
+            if len(fields) >= 3:
+                print('| ' + fields[2])
+            else:
+                print('|')
+            print('| ' + fields[1])
+
     for word in words:
-        names = [word.name] + word.equivalences
-        print(f"""|-
-| {{{{ALB|<nowiki>{word.atoms}</nowiki>}}}}
-| {' / '.join(names)}""")
-        print('| ' + ' '.join(
-            f'{{{{ALB|<nowiki>{lookup(x.casefold(), word_dict)}</nowiki>}}}} ({x})'
-            for x in word.components))
+        print_wiki_word(word, word_dict, original.get(word.atoms), use_nowiki)
 
 
 def main():
@@ -218,13 +308,20 @@ def main():
         help="The GameData.json file")
     parser.add_argument('-w', '--wikitable', action='store_true',
         help="Output words as the body of a wiki table")
+    parser.add_argument('-m', '--merge', type=argparse.FileType('r'),
+        help="Original wiki table content to merge")
+    parser.add_argument('-q', '--quote', action='store_true',
+        help="Use &apos; instead of <nowiki> to escape Ancient words")
 
     args = parser.parse_args()
     data = json.load(args.game_data)
     atoms = compute_atoms(data['atoms'])
     words = compute_words(data['words'], atoms)
+    original_content = {}
+    if args.merge:
+        original_content = parse_original(args.merge)
     if args.wikitable:
-        generate_wikitable(words)
+        generate_wikitable(words, original_content, not args.quote)
 
 
 if __name__ == '__main__':
