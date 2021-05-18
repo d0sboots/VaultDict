@@ -9,6 +9,7 @@ import argparse
 import collections
 import json
 import re
+import sys
 
 # Out-of-game data: To use the ancientrunes font, we must map rune names to
 # characters. This essentially requires hardcoding the knowledge of what all
@@ -190,6 +191,14 @@ def compute_words(words_list, atoms):
     return words
 
 
+def compute_seen_words(inscription_list):
+    """Computes the set of all words seen in phrases in the game"""
+    return {word
+        for inscription in inscription_list
+            for phrase in inscription['phrases']
+                for word in phrase.split()}
+
+
 def lookup(word, word_dict):
     """Find the relevant atom_string for a word"""
     char = FONTMAP.get(word)
@@ -244,7 +253,7 @@ def alb(atoms, use_nowiki):
     return '{{ALB|' + atoms.translate(ALB_TABLE) + '}}'
 
 
-def print_wiki_word(word, word_dict, fields, use_nowiki):
+def print_wiki_word(word, word_dict, seen_words, fields, use_nowiki):
     """Print a wikitable entry for a single word"""
     orig_names = {}
     if fields:
@@ -253,12 +262,18 @@ def print_wiki_word(word, word_dict, fields, use_nowiki):
         else:
             orig_names = {x.strip(): True for x in fields[0].split('/')}
     names = []
-    for name in [word.name] + word.equivalences:
+    # Filter out emtpy equivs (relevant for 'dagger')
+    equivs = [x for x in word.equivalences if x]
+    # This sorts all the elements not in seen words to the *back*
+    equivs.sort(key=lambda x:x not in seen_words)
+    for name in [word.name] + equivs:
         if name in orig_names:
             names.append(name)
             del orig_names[name]
-        else:
+        elif name in seen_words:
             names.append(name + '?')
+        else:
+            names.append("''" + name + "''")
     for name in orig_names:
         names.append('!!' + name + '!!')
     print('|-')
@@ -271,7 +286,7 @@ def print_wiki_word(word, word_dict, fields, use_nowiki):
         print('| ' + fields[1])
 
 
-def generate_wikitable(word_dict, original, use_nowiki=True):
+def generate_wikitable(word_dict, seen_words, original, use_nowiki=True):
     """Print wikitable for the full word list"""
     words = list(word_dict.values())
     words.sort(key=lambda x:x.name.casefold())
@@ -298,7 +313,7 @@ def generate_wikitable(word_dict, original, use_nowiki=True):
             print('| ' + fields[1])
 
     for word in words:
-        print_wiki_word(word, word_dict, original.get(word.atoms), use_nowiki)
+        print_wiki_word(word, word_dict, seen_words, original.get(word.atoms), use_nowiki)
 
 
 def main():
@@ -317,11 +332,21 @@ def main():
     data = json.load(args.game_data)
     atoms = compute_atoms(data['atoms'])
     words = compute_words(data['words'], atoms)
+    expanded_words = {x
+        for word in words.values()
+            for x in [word.name] + word.equivalences}
+    expanded_words |= {'a', 'an', 'the', 'to'}
+    seen_words = compute_seen_words(data['inscriptionDatabase'])
+    for word in seen_words:
+        if word[-1] in "!?.,:":
+            word = word[:-1]
+        if word not in expanded_words:
+            print('Unknown word used in phrase: ' + word, file=sys.stderr)
     original_content = {}
     if args.merge:
         original_content = parse_original(args.merge)
     if args.wikitable:
-        generate_wikitable(words, original_content, not args.quote)
+        generate_wikitable(words, seen_words, original_content, not args.quote)
 
 
 if __name__ == '__main__':
