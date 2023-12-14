@@ -191,12 +191,26 @@ def compute_words(words_list, atoms):
     return words
 
 
-def compute_seen_words(inscription_list):
+def compute_seen_words(inscription_list, coredata):
     """Computes the set of all words seen in phrases in the game"""
-    return {word
+    seen_words = {word
         for inscription in inscription_list
             for phrase in inscription['phrases']
                 for word in phrase.split()}
+    # You can't parse JSON with regexes... but given that we know that none of
+    # the strings we want have escaped double-quotes, or actually any escape
+    # sequences at all, we *can* use regexes to find all the strings.
+    #
+    # Matches a double-quoted string that starts with '^', which is how all
+    # true string literals start, and doesn't contain various characters that
+    # would rule it out as being an inscription. In particular, no
+    # double-quotes or backslashes, which could de-sync our idea of when the
+    # string ends. There are extra exceptions for the beginning of the string,
+    # encoded as a zero-width negative lookahead assertion.
+    str_pat = re.compile(r'"\^(?![ ,.!-])[^"\\?:[>;_]+"')
+    for match in str_pat.finditer(coredata.read()):
+        print(match[0])
+    return seen_words
 
 
 def lookup(word, word_dict):
@@ -286,11 +300,21 @@ def print_wiki_word(word, word_dict, seen_words, fields, use_nowiki):
         print('| ' + fields[1])
 
 
-def generate_wikitable(word_dict, seen_words, original, use_nowiki=True):
+def generate_wikitable(word_dict, seen_words, original,
+        use_nowiki=True, split_tables=False):
     """Print wikitable for the full word list"""
     words = list(word_dict.values())
     words.sort(key=lambda x:x.name.casefold())
     known_atoms = {x.atoms for x in word_dict.values()}
+
+    extra_words = []
+    if split_tables:
+        real_words = []
+        for word in words:
+            (real_words if any(x in seen_words for x in [word.name] + word.equivalences)
+                else extra_words).append(word)
+    else:
+        real_words = words
 
     original_list = list(original.items())
     original_list.sort(key=lambda x:x[1][0].casefold())
@@ -312,8 +336,25 @@ def generate_wikitable(word_dict, seen_words, original, use_nowiki=True):
                 print('|')
             print('| ' + fields[1])
 
-    for word in words:
+    print("""{|class="wikitable sortable" style="text-align:center"
+! '''Word'''
+! '''Meaning'''
+! '''Subwords'''
+! '''Logic'''""")
+    for word in (real_words if split_tables else words):
         print_wiki_word(word, word_dict, seen_words, original.get(word.atoms), use_nowiki)
+    if split_tables:
+        print("""|}
+
+== Extra Words ==
+
+{|class="wikitable sortable" style="text-align:center"
+! '''Word'''
+! '''Meaning'''
+! '''Subwords'''""")
+    for word in extra_words:
+        print_wiki_word(word, word_dict, seen_words, None, use_nowiki)
+    print('|}')
 
 
 def main():
@@ -327,6 +368,10 @@ def main():
         help="Original wiki table content to merge")
     parser.add_argument('-q', '--quote', action='store_true',
         help="Use &apos; instead of <nowiki> to escape Ancient words")
+    parser.add_argument('-c', '--coredata', type=argparse.FileType('r'),
+        help="Path to core.json file. Needed to highlight seen words.")
+    parser.add_argument('-s', '--split', action='store_true',
+        help="Split tables into a seen and unseen (extra) component")
 
     args = parser.parse_args()
     data = json.load(args.game_data)
@@ -336,9 +381,13 @@ def main():
         for word in words.values()
             for x in [word.name] + word.equivalences}
     expanded_words |= {'a', 'an', 'the', 'to'}
-    seen_words = compute_seen_words(data['inscriptionDatabase'])
+    if args.coredata:
+        seen_words = compute_seen_words(data['inscriptionDatabase'], args.coredata)
+    else:
+        # Mark everything as seen
+        seen_words = expanded_words
     for word in seen_words:
-        if word[-1] in "!?.,:":
+        if len(word) and word[-1] in "!?.,:":
             word = word[:-1]
         if word not in expanded_words:
             print('Unknown word used in phrase: ' + word, file=sys.stderr)
@@ -346,7 +395,8 @@ def main():
     if args.merge:
         original_content = parse_original(args.merge)
     if args.wikitable:
-        generate_wikitable(words, seen_words, original_content, not args.quote)
+        generate_wikitable(words, seen_words, original_content,
+                use_nowiki=not args.quote, split_tables=args.split)
 
 
 if __name__ == '__main__':
